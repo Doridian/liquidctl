@@ -60,13 +60,7 @@ import sys
 
 import usb
 from usb.core import USBTimeoutError
-try:
-    # The hidapi package, depending on how it's compiled, exposes one or two
-    # top level modules: hid and, optionally, hidraw.  When both are available,
-    # hid will be a libusb-based fallback implementation, and we prefer hidraw.
-    import hidraw as hid
-except ModuleNotFoundError:
-    import hid
+import hid
 try:
     import libusb_package
 except ModuleNotFoundError:
@@ -408,14 +402,16 @@ class HidapiDevice:
 
         echo '<bus>-<port>:1.0' | sudo tee /sys/bus/usb/drivers/usbhid/bind
     """
+    hiddev: hid.Device
+
     def __init__(self, hidapi, hidapi_dev_info):
         self.api = hidapi
         self.hidinfo = hidapi_dev_info
-        self.hiddev = self.api.device()
 
     def open(self):
         """Connect to the device."""
-        self.hiddev.open_path(self.hidinfo['path'])
+        self.hiddev = self.api.Device(self.hidinfo['vendor_id'], self.hidinfo['product_id'])
+        #self.hiddev.open_path(self.hidinfo['path'])
 
     def close(self):
         """NOOP."""
@@ -431,12 +427,13 @@ class HidapiDevice:
         This method quickly reads and discards any already enqueued reports,
         and is useful when later reads are not expected to return stale data.
         """
-        if self.hiddev.set_nonblocking(True) == 0:
-            timeout_ms = 0  # use hid_read; wont block because call succeeded
-        else:
-            timeout_ms = 1  # smallest timeout forwarded to hid_read_timeout
+        try:
+            self.hiddev.nonblocking = True
+            timeout = None  # use hid_read; wont block because call succeeded
+        except:
+            timeout = 1  # smallest timeout forwarded to hid_read_timeout
         discarded = 0
-        while self.hiddev.read(max_length=1, timeout_ms=timeout_ms):
+        while self.hiddev.read(size=1, timeout=timeout):
             discarded += 1
         _LOGGER.debug('discarded %d previously enqueued reports', discarded)
 
@@ -453,12 +450,10 @@ class HidapiDevice:
         Unlike the underlying cython-hidapi API this method wraps, pass
         `timeout=None` to disable the default timeout.
         """
-        self.hiddev.set_nonblocking(False)
-        if timeout is None:
-            timeout = 0  # cython-hidapi uses 0 for no timeout
-        elif timeout == 0:
+        self.hiddev.nonblocking = False
+        if timeout == 0:
             timeout = 1  # smallest timeout forwarded to hid_read_timeout
-        data = self.hiddev.read(max_length=length, timeout_ms=timeout)
+        data = self.hiddev.read(size=length, timeout=timeout)
         if timeout and not data:
             _LOGGER.debug('failed to read, timed out after %d ms', timeout)
             raise Timeout()
@@ -477,7 +472,7 @@ class HidapiDevice:
         """
         _LOGGER.debug('writing report 0x%02x with %d bytes: %r', data[0],
                       len(data) - 1, LazyHexRepr(data, start=1))
-        res = self.hiddev.write(data)
+        res = self.hiddev.write(bytes(data))
         if res < 0:
             raise OSError('Could not write to device')
         if res != len(data):
